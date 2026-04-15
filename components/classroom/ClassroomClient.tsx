@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { RealtimeKitProvider, useRealtimeKitClient } from '@cloudflare/realtimekit-react';
+import type { LeaveRoomState } from '@cloudflare/realtimekit';
 import { RtkMeeting } from '@cloudflare/realtimekit-react-ui';
 import { ArrowLeft, Users2 } from 'lucide-react';
 import ClassroomSidebar from './ClassroomSidebar';
@@ -233,13 +234,16 @@ export default function ClassroomClient({
 
   useEffect(() => {
     if (!meeting) return;
-    const handleRoomLeft = async () => {
+    const handleRoomLeft = async ({ state }: { state: LeaveRoomState }) => {
       // If we left intentionally to join a breakout, don't redirect
       if (leavingForBreakout.current) {
         leavingForBreakout.current = false;
         return;
       }
-      if (role === 'instructor' && instructorId === user.id) {
+      // Only mark the session as ended when the meeting was explicitly ended
+      // for everyone (state === 'ended'). A plain 'left' means the instructor
+      // simply left the room — the session should remain active for others.
+      if (state === 'ended' && role === 'instructor' && instructorId === user.id) {
         await fetch(`/api/sessions/${sessionId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
