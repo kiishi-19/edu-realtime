@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { RealtimeKitProvider, useRealtimeKitClient } from '@cloudflare/realtimekit-react';
 import type { LeaveRoomState } from '@cloudflare/realtimekit';
 import { RtkMeeting } from '@cloudflare/realtimekit-react-ui';
-import { ArrowLeft, Users2 } from 'lucide-react';
+import { ArrowLeft, Users2, Bot, FileText, Users } from 'lucide-react';
 import ClassroomSidebar from './ClassroomSidebar';
 import ClassroomToolbar from './ClassroomToolbar';
 
@@ -43,13 +43,24 @@ function BreakoutView({
   token,
   roomName,
   onLeave,
+  sessionId,
+  sessionTitle,
+  aiEnabled,
+  role,
 }: {
   token: string;
   roomName: string;
   onLeave: () => void;
+  sessionId: string;
+  sessionTitle: string;
+  aiEnabled: boolean;
+  role: 'instructor' | 'student';
 }) {
   const [breakoutMeeting, initBreakout] = useRealtimeKitClient();
   const [initialized, setInitialized] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState<'chat' | 'transcript' | 'participants' | null>(null);
+  const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([]);
+  const [liveCaption, setLiveCaption] = useState<LiveCaption | null>(null);
 
   useEffect(() => {
     if (initialized) return;
@@ -65,6 +76,46 @@ function BreakoutView({
     return () => { breakoutMeeting.self?.off('roomLeft', handler); };
   }, [breakoutMeeting, onLeave]);
 
+  // Transcript — same logic as the main room, wired to the breakout meeting
+  useEffect(() => {
+    if (!breakoutMeeting) return;
+
+    const handleTranscript = (data: TranscriptionData) => {
+      const speaker = data.name || 'Participant';
+      if (data.isPartialTranscript) {
+        setLiveCaption({ speaker, text: data.transcript });
+      } else {
+        setLiveCaption(null);
+        setTranscripts((prev) => [
+          ...prev.slice(-199),
+          { speaker, text: data.transcript, time: data.date.toISOString() },
+        ]);
+      }
+    };
+
+    const startTranscription = async () => {
+      breakoutMeeting.ai?.off('transcript', handleTranscript);
+      breakoutMeeting.ai?.on('transcript', handleTranscript);
+      const existing = breakoutMeeting.ai?.transcripts ?? [];
+      if (existing.length > 0) {
+        setTranscripts(
+          existing
+            .filter((t) => !t.isPartialTranscript)
+            .map((t) => ({ speaker: t.name || 'Participant', text: t.transcript, time: t.date.toISOString() }))
+        );
+      }
+      try { await breakoutMeeting.ai?.getActiveTranscript(); } catch { /* non-fatal */ }
+    };
+
+    if (breakoutMeeting.self?.roomJoined) startTranscription();
+    breakoutMeeting.self?.on('roomJoined', startTranscription);
+
+    return () => {
+      breakoutMeeting.ai?.off('transcript', handleTranscript);
+      breakoutMeeting.self?.off('roomJoined', startTranscription);
+    };
+  }, [breakoutMeeting]);
+
   // Explicit "Return" button — leave the breakout room first, then hand back
   const handleReturn = useCallback(async () => {
     if (breakoutMeeting?.self?.roomJoined) {
@@ -75,39 +126,109 @@ function BreakoutView({
     }
   }, [breakoutMeeting, onLeave]);
 
+  function toggleTab(tab: 'chat' | 'transcript' | 'participants') {
+    setSidebarTab((prev) => (prev === tab ? null : tab));
+  }
+
   return (
-    <div className="flex-1 min-w-0 overflow-hidden flex flex-col relative">
-      {/* Breakout banner */}
-      <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 bg-gray-900/90 backdrop-blur border border-gray-700 rounded-full px-4 py-1.5 shadow-lg">
-        <Users2 className="w-3.5 h-3.5 text-indigo-400" />
-        <span className="text-white text-xs font-medium">{roomName}</span>
-        <span className="text-gray-500 text-xs">· Breakout Room</span>
+    <div className="flex-1 min-w-0 overflow-hidden flex flex-col">
+      {/* Breakout header bar */}
+      <div className="bg-gray-900 border-b border-gray-800 h-12 shrink-0 flex items-center px-4 gap-3">
+        {/* Room identity */}
+        <div className="flex items-center gap-2 min-w-0">
+          <Users2 className="w-4 h-4 text-indigo-400 shrink-0" />
+          <span className="text-white text-sm font-medium truncate">{roomName}</span>
+          <span className="text-gray-500 text-xs shrink-0">· Breakout</span>
+        </div>
+
+        <div className="flex-1" />
+
+        {/* Sidebar toggle buttons */}
+        <div className="flex items-center gap-1">
+          {aiEnabled && (
+            <button
+              onClick={() => toggleTab('chat')}
+              title="AI Chat"
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                sidebarTab === 'chat'
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-purple-900/50 text-purple-300 hover:bg-purple-900 hover:text-purple-100'
+              }`}
+            >
+              <Bot className="w-4 h-4" />
+              <span className="hidden sm:block">AI Chat</span>
+            </button>
+          )}
+          <button
+            onClick={() => toggleTab('transcript')}
+            title="Transcript"
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              sidebarTab === 'transcript'
+                ? 'bg-indigo-600 text-white'
+                : 'text-gray-400 hover:text-white hover:bg-gray-800'
+            }`}
+          >
+            <FileText className="w-4 h-4" />
+            <span className="hidden sm:block">Transcript</span>
+          </button>
+          <button
+            onClick={() => toggleTab('participants')}
+            title="Participants"
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              sidebarTab === 'participants'
+                ? 'bg-indigo-600 text-white'
+                : 'text-gray-400 hover:text-white hover:bg-gray-800'
+            }`}
+          >
+            <Users className="w-4 h-4" />
+            <span className="hidden sm:block">People</span>
+          </button>
+        </div>
+
+        {/* Return button */}
         <button
           onClick={handleReturn}
-          className="ml-2 flex items-center gap-1 text-xs text-red-400 hover:text-red-200 transition-colors"
+          className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-200 bg-red-900/20 hover:bg-red-900/40 px-2.5 py-1.5 rounded-lg transition-colors"
         >
-          <ArrowLeft className="w-3 h-3" />
-          Return to main room
+          <ArrowLeft className="w-3.5 h-3.5" />
+          <span className="hidden sm:block">Main room</span>
         </button>
       </div>
 
-      {/* Breakout meeting — fills remaining height */}
-      <div className="flex-1 overflow-hidden" style={{ height: '100%' }}>
-        {breakoutMeeting ? (
-          <RealtimeKitProvider value={breakoutMeeting}>
-            <RtkMeeting
-              mode="fill"
-              meeting={breakoutMeeting}
-              showSetupScreen={false}
-            />
-          </RealtimeKitProvider>
-        ) : (
-          <div className="h-full flex items-center justify-center bg-gray-900">
-            <div className="text-center text-white space-y-3">
-              <div className="w-8 h-8 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin mx-auto" />
-              <p className="text-gray-400 text-sm">Joining {roomName}…</p>
+      {/* Meeting + sidebar */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Breakout meeting */}
+        <div className="flex-1 min-w-0 overflow-hidden">
+          {breakoutMeeting ? (
+            <RealtimeKitProvider value={breakoutMeeting}>
+              <RtkMeeting
+                mode="fill"
+                meeting={breakoutMeeting}
+                showSetupScreen={false}
+              />
+            </RealtimeKitProvider>
+          ) : (
+            <div className="h-full flex items-center justify-center bg-gray-900">
+              <div className="text-center text-white space-y-3">
+                <div className="w-8 h-8 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin mx-auto" />
+                <p className="text-gray-400 text-sm">Joining {roomName}…</p>
+              </div>
             </div>
-          </div>
+          )}
+        </div>
+
+        {/* Sidebar — AI chat, transcript, or participants */}
+        {sidebarTab && breakoutMeeting && (
+          <ClassroomSidebar
+            tab={sidebarTab}
+            sessionId={sessionId}
+            sessionTitle={sessionTitle}
+            meeting={breakoutMeeting}
+            transcripts={transcripts}
+            liveCaption={liveCaption}
+            role={role}
+            aiEnabled={aiEnabled}
+          />
         )}
       </div>
     </div>
@@ -323,6 +444,10 @@ export default function ClassroomClient({
             token={breakout.token}
             roomName={breakout.roomName}
             onLeave={handleLeaveBreakout}
+            sessionId={sessionId}
+            sessionTitle={sessionTitle}
+            aiEnabled={aiEnabled}
+            role={role}
           />
         ) : (
           <div className="flex-1 min-w-0 overflow-hidden relative">
