@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { RealtimeKitProvider, useRealtimeKitClient } from '@cloudflare/realtimekit-react';
 import { RtkMeeting } from '@cloudflare/realtimekit-react-ui';
@@ -56,12 +56,22 @@ function BreakoutView({
     initBreakout({ authToken: token, defaults: VIDEO_DEFAULTS });
   }, [token, initBreakout, initialized]);
 
-  // Leave breakout and return to main room
+  // Leave breakout and return to main room (triggered by RTK's own leave button)
   useEffect(() => {
     if (!breakoutMeeting) return;
     const handler = () => onLeave();
     breakoutMeeting.self?.on('roomLeft', handler);
     return () => { breakoutMeeting.self?.off('roomLeft', handler); };
+  }, [breakoutMeeting, onLeave]);
+
+  // Explicit "Return" button — leave the breakout room first, then hand back
+  const handleReturn = useCallback(async () => {
+    if (breakoutMeeting?.self?.roomJoined) {
+      try { await breakoutMeeting.leaveRoom(); } catch { /* non-fatal */ }
+      // onLeave will be called by the roomLeft event handler above
+    } else {
+      onLeave();
+    }
   }, [breakoutMeeting, onLeave]);
 
   return (
@@ -72,7 +82,7 @@ function BreakoutView({
         <span className="text-white text-xs font-medium">{roomName}</span>
         <span className="text-gray-500 text-xs">· Breakout Room</span>
         <button
-          onClick={onLeave}
+          onClick={handleReturn}
           className="ml-2 flex items-center gap-1 text-xs text-red-400 hover:text-red-200 transition-colors"
         >
           <ArrowLeft className="w-3 h-3" />
@@ -130,25 +140,42 @@ export default function ClassroomClient({
   // Breakout state — when set, BreakoutView replaces the main meeting pane
   const [breakout, setBreakout] = useState<{ token: string; roomName: string } | null>(null);
 
+  // Prevents the roomLeft handler from redirecting when we leave intentionally for a breakout
+  const leavingForBreakout = useRef(false);
+
   // ── Join main session ────────────────────────────────────────────────
 
-  useEffect(() => {
-    async function joinSession() {
-      setJoining(true);
-      try {
-        const res = await fetch(`/api/sessions/${sessionId}/join`, { method: 'POST' });
-        const data = await res.json();
-        if (!res.ok) { setError(data.error || 'Failed to join session'); return; }
-        setAuthToken(data.auth_token);
-        setRole(data.role);
-      } catch {
-        setError('Network error while joining session');
-      } finally {
-        setJoining(false);
-      }
+  // Extracted so it can be called both on mount and when returning from breakout
+  const joinMainSession = useCallback(async (signal?: AbortSignal) => {
+    setJoining(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/join`, {
+        method: 'POST',
+        signal,
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || 'Failed to join session'); return null; }
+      setRole(data.role);
+      return data.auth_token as string;
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') return null;
+      setError('Network error while joining session');
+      return null;
+    } finally {
+      // Only clear joining if the request wasn't aborted
+      if (!signal?.aborted) setJoining(false);
     }
-    joinSession();
   }, [sessionId]);
+
+  // Initial join — AbortController prevents double-call from React Strict Mode
+  useEffect(() => {
+    const controller = new AbortController();
+    joinMainSession(controller.signal).then((token) => {
+      if (token) setAuthToken(token);
+    });
+    return () => { controller.abort(); };
+  }, [joinMainSession]);
 
   useEffect(() => {
     if (!authToken) return;
@@ -207,6 +234,11 @@ export default function ClassroomClient({
   useEffect(() => {
     if (!meeting) return;
     const handleRoomLeft = async () => {
+      // If we left intentionally to join a breakout, don't redirect
+      if (leavingForBreakout.current) {
+        leavingForBreakout.current = false;
+        return;
+      }
       if (role === 'instructor' && instructorId === user.id) {
         await fetch(`/api/sessions/${sessionId}`, {
           method: 'PATCH',
@@ -222,14 +254,23 @@ export default function ClassroomClient({
 
   // ── Breakout room handlers ───────────────────────────────────────────
 
-  const handleJoinBreakout = useCallback((token: string, roomName: string) => {
+  const handleJoinBreakout = useCallback(async (token: string, roomName: string) => {
+    // Mark that we're leaving for a breakout so roomLeft doesn't redirect
+    leavingForBreakout.current = true;
+    setSidebarTab(null);
     setBreakout({ token, roomName });
-    setSidebarTab(null); // close sidebar when entering breakout
-  }, []);
+    // Leave the main room — user should not be in both rooms simultaneously
+    if (meeting?.self?.roomJoined) {
+      try { await meeting.leaveRoom(); } catch { /* non-fatal */ }
+    }
+  }, [meeting]);
 
-  const handleLeaveBreakout = useCallback(() => {
+  const handleLeaveBreakout = useCallback(async () => {
     setBreakout(null);
-  }, []);
+    setAuthToken(null); // Clears auth so the loading screen shows while re-joining
+    const token = await joinMainSession();
+    if (token) setAuthToken(token);
+  }, [joinMainSession]);
 
   // ── Render ───────────────────────────────────────────────────────────
 
